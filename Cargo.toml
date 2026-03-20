@@ -53,6 +53,14 @@ mcp = ["dep:apcore-mcp"]
 openapi = ["dep:utoipa"]
 all = ["cli", "mcp", "openapi"]
 
+[[example]]
+name = "openapi_scanner"
+required-features = ["openapi"]
+
+[[example]]
+name = "mcp_server"
+required-features = ["mcp"]
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
