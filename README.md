@@ -1,7 +1,3 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/aipartnerup/apcore/main/apcore-logo.svg" alt="apcore logo" width="200"/>
-</div>
-
 # axum-apcore
 
 ![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)
