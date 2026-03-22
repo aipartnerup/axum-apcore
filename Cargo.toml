@@ -1,14 +1,14 @@
 [package]
 name = "axum-apcore"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Axum integration for the apcore AI-Perceivable Core ecosystem"
 license = "Apache-2.0"
 readme = "README.md"
-authors = ["aipartnerup <tercel.yi@gmail.com>"]
-homepage = "https://aipartnerup.com"
-repository = "https://github.com/aipartnerup/axum-apcore"
-documentation = "https://github.com/aipartnerup/axum-apcore#readme"
+authors = ["aiperceivable <tercel.yi@gmail.com>"]
+homepage = "https://aiperceivable.com"
+repository = "https://github.com/aiperceivable/axum-apcore"
+documentation = "https://github.com/aiperceivable/axum-apcore#readme"
 keywords = ["apcore", "axum", "mcp", "ai", "tools"]
 categories = [
     "api-bindings",

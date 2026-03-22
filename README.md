@@ -5,7 +5,7 @@
 
 > **Expose Axum routes as AI-perceivable modules.**
 
-Axum integration for the [apcore](https://github.com/aipartnerup/apcore-rust) AI-Perceivable Core ecosystem.
+Axum integration for the [apcore](https://github.com/aiperceivable/apcore-rust) AI-Perceivable Core ecosystem.
 
 **axum-apcore** automatically scans your Axum routes and exposes them as apcore modules — with full execution, context mapping, MCP serving, and OpenAI tool export. Define your routes once, and both code and AI can discover, understand, and invoke them through enforced schemas and behavioral annotations.
 
@@ -304,7 +304,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ### Clone and build
 
 ```bash
-git clone https://github.com/aipartnerup/axum-apcore.git
+git clone https://github.com/aiperceivable/axum-apcore.git
 cd axum-apcore
 cargo build --all-features
 ```
@@ -336,7 +336,7 @@ cargo doc --all-features --open
 
 ## Architecture
 
-axum-apcore follows the same module structure as [fastapi-apcore](https://github.com/aipartnerup/fastapi-apcore):
+axum-apcore follows the same module structure as [fastapi-apcore](https://github.com/aiperceivable/fastapi-apcore):
 
 | Rust Module | FastAPI Module | Purpose |
 |-------------|----------------|---------|
@@ -358,8 +358,8 @@ Apache-2.0
 
 ## Links
 
-- **Core SDK**: [aipartnerup/apcore-rust](https://github.com/aipartnerup/apcore-rust)
-- **Toolkit**: [aipartnerup/apcore-toolkit-rust](https://github.com/aipartnerup/apcore-toolkit-rust)
-- **Reference**: [aipartnerup/fastapi-apcore](https://github.com/aipartnerup/fastapi-apcore)
-- **Website**: [aipartnerup.com](https://aipartnerup.com)
-- **Issues**: [GitHub Issues](https://github.com/aipartnerup/axum-apcore/issues)
+- **Core SDK**: [aiperceivable/apcore-rust](https://github.com/aiperceivable/apcore-rust)
+- **Toolkit**: [aiperceivable/apcore-toolkit-rust](https://github.com/aiperceivable/apcore-toolkit-rust)
+- **Reference**: [aiperceivable/fastapi-apcore](https://github.com/aiperceivable/fastapi-apcore)
+- **Website**: [aiperceivable.com](https://aiperceivable.com)
+- **Issues**: [GitHub Issues](https://github.com/aiperceivable/axum-apcore/issues)
