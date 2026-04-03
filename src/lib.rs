@@ -41,3 +41,10 @@ pub use apcore::{
 
 // Re-export toolkit types used in the public API.
 pub use apcore_toolkit::ScannedModule;
+
+#[cfg(feature = "cli")]
+pub use apcore_toolkit::HTTPProxyRegistryWriter;
+
+// Re-export apcore-cli types when the CLI feature is enabled.
+#[cfg(feature = "cli")]
+pub use client::CreateCliConfig;

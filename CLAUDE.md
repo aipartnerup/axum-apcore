@@ -98,7 +98,7 @@
 | `engine/observability` | `engine/observability.py` | Tracing/metrics/logging setup |
 | `engine/tasks` | `engine/tasks.py` | Async task management |
 | `output/registry_writer` | `output/registry_writer.py` | ScannedModule → Registry registration |
-| `cli` | `cli.py` | clap CLI (scan/serve/export/tasks) |
+| `cli` | `cli.py` | clap CLI (scan/serve/export/tasks) + apcore-cli delegation (list/describe/completion/man/init) |
 
 ### Key Design Decisions
 
@@ -106,6 +106,7 @@
 2. **OpenAPI scanner** relies on external utoipa-generated specs (compile-time generation).
 3. **Context extraction** uses Axum's `FromRequestParts` trait for ergonomic `ApContext` extractors.
 4. **Singleton management** uses `OnceLock` for thread-safe lazy initialization.
+5. **CLI integration** composes apcore-cli as a library — framework-specific commands (scan/serve/export/tasks) are hand-rolled, while discovery/shell/init commands delegate to apcore-cli. The `create_cli()` method mirrors fastapi-apcore's pattern: scan routes → register as HTTP proxy modules → build grouped clap Command.
 
 ## Dependency Management
 

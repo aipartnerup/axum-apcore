@@ -19,7 +19,8 @@ Axum integration for the [apcore](https://github.com/aiperceivable/apcore-rust) 
 - **MCP server** — Serve registered modules as MCP tools (stdio, streamable-http, SSE transports)
 - **OpenAI export** — Export modules as OpenAI-compatible tool definitions
 - **YAML bindings** — Auto-discover modules from YAML binding files
-- **CLI** — Scan, serve, export, and manage tasks from the command line
+- **CLI** — Scan, serve, export, manage tasks, list/describe modules, shell completions, man pages, and module scaffolding
+- **HTTP proxy CLI** — Generate a full CLI where each command forwards requests to the running API via HTTP (`create_cli()`)
 - **Configuration** — `APCORE_*` environment variables for all settings
 - **Observability** — Tracing middleware, metrics collection, and structured logging via `tracing`
 
@@ -75,7 +76,7 @@ tracing-subscriber = "0.3"
 
 | Feature | Description | Dependencies |
 |---------|-------------|-------------|
-| `cli` | CLI commands (scan, serve, export, tasks) | `clap` |
+| `cli` | CLI commands + HTTP proxy CLI + shell completions | `clap`, `clap_complete`, `apcore-cli`, `apcore-toolkit/http-proxy` |
 | `mcp` | MCP server and OpenAI tools export | `apcore-mcp` |
 | `openapi` | OpenAPI spec scanning via utoipa | `utoipa` |
 | `all` | Enable all optional features | — |
@@ -219,6 +220,119 @@ let result = apcore.get_task_result(&task_id);
 apcore.cancel_task(&task_id);
 ```
 
+### HTTP proxy CLI
+
+Generate a CLI where each command forwards requests to the running API via HTTP:
+
+```rust
+use axum_apcore::{AxumApcore, CreateCliConfig};
+
+let apcore = AxumApcore::new();
+let config = CreateCliConfig {
+    prog_name: "myapp-cli".into(),
+    base_url: "http://localhost:3000".into(),
+    ..Default::default()
+};
+
+let cmd = apcore.create_cli(&router, config).await?;
+```
+
+## CLI Reference
+
+The CLI provides both framework-specific commands and apcore-cli commands (requires `cli` feature):
+
+### Framework Commands
+
+| Command | Description |
+|---------|-------------|
+| `scan` | Scan Axum routes and generate module definitions |
+| `serve` | Start MCP server exposing registered modules |
+| `export` | Export modules as OpenAI-compatible tool definitions |
+| `tasks list` | List async tasks (with optional `--status` filter) |
+| `tasks cancel` | Cancel a running task by ID |
+| `tasks cleanup` | Clean up old completed tasks |
+
+### `scan`
+
+```bash
+axum-apcore scan [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--source` | `native` | Scanner: `native` or `openapi` |
+| `--output` | `registry` | Output: `registry` or `yaml` |
+| `--dir` | — | Directory for YAML output |
+| `--dry-run` | — | Preview without writing |
+| `--include` | — | Regex: only include matching module IDs |
+| `--exclude` | — | Regex: exclude matching module IDs |
+| `--verify` | — | Verify registration after writing |
+
+### `serve`
+
+```bash
+axum-apcore serve [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--transport` | from settings | Transport: `stdio`, `streamable-http`, `sse` |
+| `--host` | from settings | Host to bind to |
+| `--port` | from settings | Port to listen on |
+| `--explorer` | — | Enable MCP explorer UI |
+| `--jwt-secret` | `$APCORE_JWT_SECRET` | JWT secret for authentication |
+| `--approval` | `auto` | Approval mode: `auto`, `deny`, `manual` |
+| `--tags` | — | Comma-separated module tag filter |
+| `--prefix` | — | Module ID prefix filter |
+
+### `export`
+
+```bash
+axum-apcore export [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--format` | `openai-tools` | Export format |
+| `--strict` | — | Use strict mode for OpenAI tools |
+| `--embed-annotations` | — | Embed annotations in definitions |
+| `--tags` | — | Comma-separated module tag filter |
+| `--prefix` | — | Module ID prefix filter |
+
+### apcore-cli Commands
+
+These commands are delegated to the [apcore-cli](https://github.com/aiperceivable/apcore-cli-rust) library:
+
+| Command | Description |
+|---------|-------------|
+| `list` | List available modules (with `--tag` filter, `--format` table/json) |
+| `describe MODULE_ID` | Show schema and annotations for a module |
+| `completion SHELL` | Generate shell completion script (bash, zsh, fish, elvish, powershell) |
+| `man [COMMAND]` | Generate a roff man page |
+| `init module MODULE_ID` | Scaffold a new module (with `--style`, `--dir`, `--description`) |
+
+### Examples
+
+```bash
+# List all modules in table format
+axum-apcore list
+
+# List modules filtered by tag, output as JSON
+axum-apcore list --tag users --format json
+
+# Describe a specific module
+axum-apcore describe users.get_user.get
+
+# Generate bash completions
+axum-apcore completion bash
+
+# Generate man page for the program
+axum-apcore man
+
+# Scaffold a new module with binding style
+axum-apcore init module users.create_user --style binding --description "Create a user"
+```
+
 ## Configuration
 
 All settings are read from environment variables with the `APCORE_` prefix:
@@ -249,6 +363,7 @@ cargo run --example handler_registration
 cargo run --example async_tasks
 cargo run --example openapi_scanner --features openapi
 cargo run --example mcp_server --features mcp
+cargo run --example cli_proxy --features cli
 ```
 
 | Example | Description |
@@ -258,6 +373,7 @@ cargo run --example mcp_server --features mcp
 | `async_tasks` | Submit background tasks, poll status, cancel, and list tasks |
 | `openapi_scanner` | Scan a utoipa-generated OpenAPI spec with include/exclude filters |
 | `mcp_server` | Create an MCP server and export OpenAI-compatible tool definitions |
+| `cli_proxy` | Generate an HTTP proxy CLI with `create_cli()` |
 
 ## Tests
 
@@ -350,7 +466,7 @@ axum-apcore follows the same module structure as [fastapi-apcore](https://github
 | `engine/observability` | `engine/observability.py` | Tracing/metrics/logging setup |
 | `engine/tasks` | `engine/tasks.py` | Async task management |
 | `output/registry_writer` | `output/registry_writer.py` | ScannedModule → Registry registration |
-| `cli` | `cli.py` | clap CLI (scan/serve/export/tasks) |
+| `cli` | `cli.py` | clap CLI (scan/serve/export/tasks) + apcore-cli (list/describe/completion/man/init) |
 
 ## License
 

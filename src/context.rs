@@ -178,7 +178,7 @@ mod tests {
         let (parts, _) = req.into_parts();
         let factory = AxumContextFactory;
         let ctx = factory.create_from_parts(&parts).unwrap();
-        assert_eq!(ctx.identity.id, "anonymous");
+        assert_eq!(ctx.identity.as_ref().unwrap().id, "anonymous");
         assert!(!ctx.trace_id.is_empty());
     }
 

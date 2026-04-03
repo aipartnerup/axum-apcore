@@ -47,7 +47,7 @@ async fn echo_handler(input: Value, _ctx: &Context<Value>) -> Result<Value, Modu
 
 async fn ctx_echo_handler(input: Value, ctx: &Context<Value>) -> Result<Value, ModuleError> {
     Ok(json!({
-        "caller": ctx.identity.id,
+        "caller": ctx.identity.as_ref().map(|i| i.id.as_str()).unwrap_or("anonymous"),
         "input": input,
     }))
 }
@@ -318,9 +318,10 @@ fn test_context_factory_with_request_identity() {
     let (parts, _) = req.into_parts();
 
     let ctx = factory.create_from_parts(&parts).unwrap();
-    assert_eq!(ctx.identity.id, "svc-1");
-    assert_eq!(ctx.identity.identity_type, "service");
-    assert_eq!(ctx.identity.roles.len(), 2);
+    let identity = ctx.identity.as_ref().unwrap();
+    assert_eq!(identity.id, "svc-1");
+    assert_eq!(identity.identity_type, "service");
+    assert_eq!(identity.roles.len(), 2);
 }
 
 #[test]
@@ -331,7 +332,7 @@ fn test_context_factory_anonymous_fallback() {
     let (parts, _) = req.into_parts();
 
     let ctx = factory.create_from_parts(&parts).unwrap();
-    assert_eq!(ctx.identity.id, "anonymous");
+    assert_eq!(ctx.identity.as_ref().unwrap().id, "anonymous");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,16 +1,20 @@
 // CLI commands for axum-apcore.
 //
-// Provides scan, serve, export, and tasks commands via clap.
-// Equivalent to fastapi-apcore's Typer-based CLI.
+// Provides scan, serve, export, tasks, and apcore-cli commands via clap.
+// The scan/serve/export/tasks commands are framework-specific.
+// The list/describe/completion/man/init commands are delegated to apcore-cli.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::engine::tasks::TaskManager;
 use crate::errors::AxumApcoreError;
 use crate::output::AxumRegistryWriter;
 use crate::scanner::get_scanner;
 
-/// axum-apcore CLI — scan routes, serve MCP, and export tools.
+// clap_complete is feature-gated with cli, same as this module.
+use clap_complete::Shell;
+
+/// axum-apcore CLI — scan routes, serve MCP, export tools, and manage modules.
 #[derive(Parser, Debug)]
 #[command(name = "axum-apcore", version, about)]
 pub struct Cli {
@@ -114,6 +118,66 @@ pub enum Commands {
         #[command(subcommand)]
         action: TaskCommands,
     },
+
+    /// List available modules in the registry.
+    List {
+        /// Filter by tag (can be repeated).
+        #[arg(long)]
+        tag: Vec<String>,
+
+        /// Output format: "table" or "json".
+        #[arg(long)]
+        format: Option<String>,
+    },
+
+    /// Show schema and annotations for a module.
+    Describe {
+        /// Module ID to describe.
+        module_id: String,
+
+        /// Output format: "table" or "json".
+        #[arg(long)]
+        format: Option<String>,
+    },
+
+    /// Generate a shell completion script.
+    Completion {
+        /// Shell to generate completions for.
+        shell: String,
+    },
+
+    /// Generate a roff man page.
+    Man {
+        /// Command to generate man page for.
+        command: Option<String>,
+    },
+
+    /// Scaffold a new apcore module.
+    Init {
+        #[command(subcommand)]
+        action: InitCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InitCommands {
+    /// Create a new module scaffold.
+    Module {
+        /// Module ID (dotted name, e.g. "users.get_user").
+        module_id: String,
+
+        /// Scaffold style: "decorator", "convention", or "binding".
+        #[arg(long, default_value = "convention")]
+        style: String,
+
+        /// Output directory.
+        #[arg(long)]
+        dir: Option<String>,
+
+        /// Module description.
+        #[arg(long)]
+        description: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -172,6 +236,11 @@ pub async fn run(cli: Cli) -> Result<(), AxumApcoreError> {
             prefix,
         } => run_export(format, strict, embed_annotations, tags, prefix),
         Commands::Tasks { action } => run_tasks(action),
+        Commands::List { tag, format } => run_list(tag, format),
+        Commands::Describe { module_id, format } => run_describe(module_id, format),
+        Commands::Completion { shell } => run_completion(shell),
+        Commands::Man { command } => run_man(command),
+        Commands::Init { action } => run_init(action),
     }
 }
 
@@ -373,6 +442,137 @@ fn run_tasks(action: TaskCommands) -> Result<(), AxumApcoreError> {
     Ok(())
 }
 
+/// Build an `ApCoreRegistryProvider` from the global registry singleton.
+///
+/// Since `Registry` is not `Clone`, we rebuild a provider by re-registering
+/// module descriptors into a fresh registry.
+fn build_registry_provider() -> apcore_cli::ApCoreRegistryProvider {
+    let registry_arc = crate::engine::registry::get_registry();
+    let registry = registry_arc.lock().expect("registry lock poisoned");
+
+    let mut fresh = apcore::Registry::new();
+    for name in registry.list(None, None) {
+        if let Some(descriptor) = registry.get_definition(name) {
+            let fm = apcore::decorator::FunctionModule::new::<_, ()>(
+                descriptor.annotations.clone(),
+                descriptor.input_schema.clone(),
+                descriptor.output_schema.clone(),
+                |inputs: serde_json::Value,
+                 _ctx: &apcore::Context<serde_json::Value>|
+                 -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<serde_json::Value, apcore::ModuleError>,
+                            > + Send
+                            + '_,
+                    >,
+                > { Box::pin(async move { Ok(inputs) }) },
+            );
+            let _ = fresh.register(name, Box::new(fm), descriptor.clone());
+        }
+    }
+
+    apcore_cli::ApCoreRegistryProvider::new(fresh)
+}
+
+/// Execute the `list` command via apcore-cli.
+fn run_list(tags: Vec<String>, format: Option<String>) -> Result<(), AxumApcoreError> {
+    let provider = build_registry_provider();
+    let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+
+    let output = apcore_cli::cmd_list(&provider, &tag_refs, format.as_deref())
+        .map_err(|e| AxumApcoreError::Config(format!("List error: {e}")))?;
+    println!("{output}");
+    Ok(())
+}
+
+/// Execute the `describe` command via apcore-cli.
+fn run_describe(module_id: String, format: Option<String>) -> Result<(), AxumApcoreError> {
+    let provider = build_registry_provider();
+
+    let output = apcore_cli::cmd_describe(&provider, &module_id, format.as_deref())
+        .map_err(|e| AxumApcoreError::Config(format!("Describe error: {e}")))?;
+    println!("{output}");
+    Ok(())
+}
+
+/// Execute the `completion` command via apcore-cli.
+fn run_completion(shell: String) -> Result<(), AxumApcoreError> {
+    let shell_val: Shell = shell
+        .parse()
+        .map_err(|e| AxumApcoreError::Config(format!("Unknown shell '{shell}': {e}")))?;
+
+    let mut cmd = Cli::command();
+    let output = apcore_cli::cmd_completion(shell_val, "axum-apcore", &mut cmd);
+    print!("{output}");
+    Ok(())
+}
+
+/// Execute the `man` command via apcore-cli.
+fn run_man(command: Option<String>) -> Result<(), AxumApcoreError> {
+    let root_cmd = Cli::command();
+
+    match command {
+        Some(cmd_name) => {
+            let output = apcore_cli::cmd_man(
+                &cmd_name,
+                &root_cmd,
+                "axum-apcore",
+                env!("CARGO_PKG_VERSION"),
+            )
+            .map_err(|e| AxumApcoreError::Config(format!("Man error: {e}")))?;
+            print!("{output}");
+        }
+        None => {
+            let output = apcore_cli::build_program_man_page(
+                &root_cmd,
+                "axum-apcore",
+                env!("CARGO_PKG_VERSION"),
+                None,
+                None,
+            );
+            print!("{output}");
+        }
+    }
+    Ok(())
+}
+
+/// Execute the `init` subcommand via apcore-cli.
+fn run_init(action: InitCommands) -> Result<(), AxumApcoreError> {
+    match action {
+        InitCommands::Module {
+            module_id,
+            style,
+            dir,
+            description,
+        } => {
+            // Build clap ArgMatches to pass to apcore-cli's handle_init
+            let mut args = vec![
+                "init".to_string(),
+                "module".to_string(),
+                module_id,
+                "--style".to_string(),
+                style,
+            ];
+            if let Some(d) = dir {
+                args.push("--dir".to_string());
+                args.push(d);
+            }
+            if let Some(desc) = description {
+                args.push("--description".to_string());
+                args.push(desc);
+            }
+
+            let cmd = apcore_cli::init_command();
+            let matches = cmd
+                .try_get_matches_from(args)
+                .map_err(|e| AxumApcoreError::Config(format!("Init error: {e}")))?;
+            apcore_cli::handle_init(&matches);
+            Ok(())
+        }
+    }
+}
+
 /// Parse comma-separated tags string into a Vec.
 fn parse_tags(tags: &str) -> Vec<String> {
     tags.split(',')
@@ -502,6 +702,118 @@ mod tests {
                 assert_eq!(tags.unwrap(), "users,tasks");
             }
             _ => panic!("Expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_list() {
+        let cli = Cli::try_parse_from(["axum-apcore", "list"]).unwrap();
+        assert!(matches!(cli.command, Commands::List { .. }));
+    }
+
+    #[test]
+    fn test_cli_parse_list_with_tags() {
+        let cli = Cli::try_parse_from(["axum-apcore", "list", "--tag", "users", "--tag", "admin"])
+            .unwrap();
+        match cli.command {
+            Commands::List { tag, .. } => {
+                assert_eq!(tag, vec!["users", "admin"]);
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_describe() {
+        let cli = Cli::try_parse_from(["axum-apcore", "describe", "users.get_user.get"]).unwrap();
+        match cli.command {
+            Commands::Describe { module_id, .. } => {
+                assert_eq!(module_id, "users.get_user.get");
+            }
+            _ => panic!("Expected Describe command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_completion() {
+        let cli = Cli::try_parse_from(["axum-apcore", "completion", "bash"]).unwrap();
+        match cli.command {
+            Commands::Completion { shell } => {
+                assert_eq!(shell, "bash");
+            }
+            _ => panic!("Expected Completion command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_man() {
+        let cli = Cli::try_parse_from(["axum-apcore", "man"]).unwrap();
+        assert!(matches!(cli.command, Commands::Man { .. }));
+    }
+
+    #[test]
+    fn test_build_registry_provider_empty() {
+        // With no modules registered, provider should return an empty list.
+        let provider = build_registry_provider();
+        let modules = apcore_cli::discovery::RegistryProvider::list(&provider);
+        // May contain modules from other tests due to shared global state,
+        // but should not panic.
+        let _ = modules;
+    }
+
+    #[test]
+    fn test_run_list_empty_registry() {
+        // Listing with no modules should succeed (not panic).
+        let result = run_list(vec![], Some("json".into()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_completion_bash() {
+        let result = run_completion("bash".into());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_completion_invalid_shell() {
+        let result = run_completion("invalid-shell".into());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_man_program_page() {
+        let result = run_man(None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_man_unknown_command() {
+        let result = run_man(Some("nonexistent-command".into()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_init_module() {
+        let cli = Cli::try_parse_from([
+            "axum-apcore",
+            "init",
+            "module",
+            "users.get_user",
+            "--style",
+            "binding",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Init {
+                action:
+                    InitCommands::Module {
+                        module_id, style, ..
+                    },
+            } => {
+                assert_eq!(module_id, "users.get_user");
+                assert_eq!(style, "binding");
+            }
+            _ => panic!("Expected Init Module command"),
         }
     }
 }
