@@ -13,10 +13,11 @@ static REGISTRY: OnceLock<Arc<Mutex<Registry>>> = OnceLock::new();
 
 /// Global singleton for the apcore Executor.
 ///
-/// Uses `tokio::sync::Mutex` because the executor's async methods (`call`,
-/// `stream`) require holding the lock across `.await` points. A
-/// `std::sync::Mutex` would block the entire thread in that scenario.
-static EXECUTOR: OnceLock<Arc<tokio::sync::Mutex<Executor>>> = OnceLock::new();
+/// Stored as a bare `Arc<Executor>` (no outer lock). Since apcore 0.25 the
+/// `Executor` is fully interior-mutable — `call`/`stream` take `&self` and its
+/// `registry` is an interior-mutable `Arc<Registry>` — so concurrent callers
+/// can share one executor without serializing through a `Mutex`.
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
 /// Get or initialize the global Registry singleton.
 pub fn get_registry() -> Arc<Mutex<Registry>> {
@@ -30,28 +31,34 @@ pub fn get_registry() -> Arc<Mutex<Registry>> {
 
 /// Get or initialize the global Executor singleton.
 ///
-/// Returns a `tokio::sync::Mutex`-wrapped executor to allow safe usage
-/// across `.await` points in `call()`, `stream()`, and `cancellable_call()`.
-pub fn get_executor() -> Arc<tokio::sync::Mutex<Executor>> {
+/// Returns a shared `Arc<Executor>`. The executor is interior-mutable, so
+/// `call()`, `stream()`, and `cancellable_call()` operate on `&self` without
+/// any outer lock.
+pub fn get_executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             tracing::debug!("Initializing apcore Executor");
             let registry = Registry::new();
             let config = build_config();
-            Arc::new(tokio::sync::Mutex::new(Executor::new(registry, config)))
+            Arc::new(Executor::new(registry, config))
         })
         .clone()
 }
 
 /// Build an apcore Config from settings.
+///
+/// Uses `Config::from_defaults()` (not `Config::default()`) so the built-in
+/// namespace registry is initialized — `from_defaults` is apcore's canonical
+/// constructor for user code, while bare `default()` is reserved for internal
+/// test scaffolding. Tracing/metrics toggles moved under the nested
+/// `observability` config in apcore 0.18.
 fn build_config() -> Config {
     let settings = get_apcore_settings();
-    Config {
-        enable_tracing: settings.tracing,
-        enable_metrics: settings.metrics,
-        modules_path: Some(settings.module_dir.clone()),
-        ..Config::default()
-    }
+    let mut config = Config::from_defaults();
+    config.modules_path = Some(settings.module_dir.clone());
+    config.observability.tracing.enabled = settings.tracing;
+    config.observability.metrics.enabled = settings.metrics;
+    config
 }
 
 #[cfg(test)]

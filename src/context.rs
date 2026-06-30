@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use apcore::context::{Context, Identity};
-use apcore::trace_context::{TraceContext, TraceParent};
+use apcore::trace_context::TraceParent;
 
 use crate::errors::AxumApcoreError;
 
@@ -44,12 +44,9 @@ fn default_identity_type() -> String {
 
 impl From<RequestIdentity> for Identity {
     fn from(ri: RequestIdentity) -> Self {
-        Identity {
-            id: ri.id,
-            identity_type: ri.identity_type,
-            roles: ri.roles,
-            attrs: ri.attrs,
-        }
+        // apcore 0.16 made Identity fields private; construct via the
+        // canonical `Identity::new` constructor.
+        Identity::new(ri.id, ri.identity_type, ri.roles, ri.attrs)
     }
 }
 
@@ -92,15 +89,23 @@ pub struct AxumContextFactory;
 
 impl AxumContextFactory {
     /// Create an apcore Context from Axum request parts.
+    ///
+    /// Uses the apcore `Context::builder` so the inbound W3C `traceparent`
+    /// header propagates correctly: apcore 0.16 removed the `trace_context`
+    /// field and 0.22 routes trace propagation through `TraceParent`, deriving
+    /// the context `trace_id` (and stashing trace-flags/tracestate in the data
+    /// map) at build time.
     pub fn create_from_parts(
         &self,
         parts: &Parts,
     ) -> Result<Context<serde_json::Value>, AxumApcoreError> {
         let identity = self.extract_identity(parts);
-        let trace_context = self.extract_trace_context(parts);
+        let trace_parent = self.extract_trace_parent(parts);
 
-        let mut ctx = Context::new(identity);
-        ctx.trace_context = trace_context;
+        let ctx = Context::builder()
+            .identity(Some(identity))
+            .trace_parent(trace_parent)
+            .build();
 
         Ok(ctx)
     }
@@ -110,20 +115,19 @@ impl AxumContextFactory {
         if let Some(ri) = parts.extensions.get::<RequestIdentity>() {
             ri.clone().into()
         } else {
-            Identity {
-                id: "anonymous".into(),
-                identity_type: "anonymous".into(),
-                roles: vec![],
-                attrs: HashMap::new(),
-            }
+            Identity::new(
+                "anonymous".into(),
+                "anonymous".into(),
+                vec![],
+                HashMap::new(),
+            )
         }
     }
 
-    /// Extract W3C TraceContext from the `traceparent` header.
-    fn extract_trace_context(&self, parts: &Parts) -> Option<TraceContext> {
+    /// Extract a W3C `TraceParent` from the `traceparent` header.
+    fn extract_trace_parent(&self, parts: &Parts) -> Option<TraceParent> {
         let header = parts.headers.get("traceparent")?.to_str().ok()?;
-        let traceparent = TraceParent::parse(header).ok()?;
-        Some(TraceContext::new(traceparent))
+        TraceParent::parse(header).ok()
     }
 }
 
@@ -141,9 +145,9 @@ mod tests {
             attrs: HashMap::new(),
         };
         let identity: Identity = ri.into();
-        assert_eq!(identity.id, "user-1");
-        assert_eq!(identity.identity_type, "user");
-        assert_eq!(identity.roles, vec!["admin"]);
+        assert_eq!(identity.id(), "user-1");
+        assert_eq!(identity.identity_type(), "user");
+        assert_eq!(identity.roles(), ["admin"]);
     }
 
     #[test]
@@ -152,8 +156,8 @@ mod tests {
         let (parts, _) = req.into_parts();
         let factory = AxumContextFactory;
         let identity = factory.extract_identity(&parts);
-        assert_eq!(identity.id, "anonymous");
-        assert_eq!(identity.identity_type, "anonymous");
+        assert_eq!(identity.id(), "anonymous");
+        assert_eq!(identity.identity_type(), "anonymous");
     }
 
     #[test]
@@ -168,8 +172,8 @@ mod tests {
         let (parts, _) = req.into_parts();
         let factory = AxumContextFactory;
         let identity = factory.extract_identity(&parts);
-        assert_eq!(identity.id, "user-42");
-        assert_eq!(identity.identity_type, "service");
+        assert_eq!(identity.id(), "user-42");
+        assert_eq!(identity.identity_type(), "service");
     }
 
     #[test]
@@ -178,15 +182,31 @@ mod tests {
         let (parts, _) = req.into_parts();
         let factory = AxumContextFactory;
         let ctx = factory.create_from_parts(&parts).unwrap();
-        assert_eq!(ctx.identity.as_ref().unwrap().id, "anonymous");
+        assert_eq!(ctx.identity.as_ref().unwrap().id(), "anonymous");
         assert!(!ctx.trace_id.is_empty());
     }
 
     #[test]
-    fn test_extract_trace_context_none() {
+    fn test_extract_trace_parent_none() {
         let req = Request::builder().body(()).unwrap();
         let (parts, _) = req.into_parts();
         let factory = AxumContextFactory;
-        assert!(factory.extract_trace_context(&parts).is_none());
+        assert!(factory.extract_trace_parent(&parts).is_none());
+    }
+
+    #[test]
+    fn test_create_from_parts_propagates_traceparent() {
+        // A valid inbound W3C traceparent must seed the context trace_id with
+        // the same 32-hex trace-id portion (apcore accept-or-regenerate).
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let header = format!("00-{trace_id}-b7ad6b7169203331-01");
+        let req = Request::builder()
+            .header("traceparent", header)
+            .body(())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let factory = AxumContextFactory;
+        let ctx = factory.create_from_parts(&parts).unwrap();
+        assert_eq!(ctx.trace_id, trace_id);
     }
 }

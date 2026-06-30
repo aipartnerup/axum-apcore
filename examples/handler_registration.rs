@@ -118,12 +118,12 @@ async fn main() {
 
     // Step 5: Execute modules via call()
     println!("\n=== call() with context ===");
-    let ctx = Context::new(Identity {
-        id: "admin-1".into(),
-        identity_type: "admin".into(),
-        roles: vec!["admin".into()],
-        attrs: Default::default(),
-    });
+    let ctx = Context::new(Identity::new(
+        "admin-1".into(),
+        "admin".into(),
+        vec!["admin".into()],
+        Default::default(),
+    ));
 
     let result = apcore
         .call("users.get_user.get", json!({"id": "1"}), Some(&ctx))

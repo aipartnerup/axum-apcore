@@ -1,7 +1,11 @@
 // Configuration system for axum-apcore.
 //
 // All settings are read from environment variables with the APCORE_ prefix.
-// Mirrors the configuration pattern from fastapi-apcore.
+// Setting names and defaults mirror fastapi-apcore, with ONE intentional delta:
+// `serve_transport` defaults to "streamable-http" (not "stdio"), because axum is an
+// HTTP-native framework and stdio transport is not applicable. All other defaults
+// (including `explorer_enabled=false` and `task_max_tasks=1000`) match fastapi-apcore
+// and django-apcore for cross-integration consistency.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -90,7 +94,7 @@ impl Default for ApcoreSettings {
             serve_port: 9090,
             server_name: "axum-apcore".into(),
             explorer_prefix: "/explorer".into(),
-            explorer_enabled: true,
+            explorer_enabled: false,
             jwt_secret: None,
             jwt_algorithm: "HS256".into(),
             acl_path: None,
@@ -99,7 +103,7 @@ impl Default for ApcoreSettings {
             observability_logging: false,
             embedded_server: false,
             task_max_concurrent: 10,
-            task_max_tasks: 100,
+            task_max_tasks: 1000,
             task_cleanup_age: 3600,
             scanner_source: "native".into(),
             hot_reload: false,

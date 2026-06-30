@@ -40,7 +40,7 @@ use crate::scanner::get_scanner;
 pub struct AxumApcore {
     settings: ApcoreSettings,
     registry: Arc<Mutex<Registry>>,
-    executor: Arc<tokio::sync::Mutex<Executor>>,
+    executor: Arc<Executor>,
     context_factory: Arc<AxumContextFactory>,
     task_manager: TaskManager,
     observability: ObservabilityState,
@@ -170,18 +170,43 @@ impl AxumApcore {
         // Write only modules with registered handlers to the executor's
         // registry. This avoids overwriting real handlers with passthrough
         // handlers when multiple AxumApcore instances share a global executor.
+        //
+        // The executor's `registry` is an interior-mutable `Arc<Registry>`, so
+        // we register through `&self`. We register directly (rather than via the
+        // toolkit `RegistryWriter`) for two reasons: we reuse the descriptor the
+        // writer just produced for the query registry to keep both registries in
+        // lockstep, and we need upsert semantics — `unregister` then `register`
+        // — which the writer does not provide (apcore rejects duplicate IDs).
         let handler_modules: Vec<&ScannedModule> = modules
             .iter()
             .filter(|m| handler_targets.contains(&m.target))
             .collect();
 
         if !handler_modules.is_empty() {
-            let mut executor = self.executor.lock().await;
+            let handlers = self.handler_map.lock().expect("handler map lock poisoned");
+            let registry = self.registry.lock().expect("registry lock poisoned");
+
             for module in &handler_modules {
-                let _ = executor.registry.unregister(&module.module_id);
+                let Some(handler) = handlers.get(&module.target).cloned() else {
+                    continue;
+                };
+                let descriptor = match registry.get_definition(&module.module_id) {
+                    Ok(Some(d)) => d,
+                    _ => continue,
+                };
+                let module_obj = apcore::decorator::FunctionModule::new::<_, ()>(
+                    descriptor.annotations.clone().unwrap_or_default(),
+                    descriptor.input_schema.clone(),
+                    descriptor.output_schema.clone(),
+                    move |inputs: Value, ctx: &Context<Value>| handler(inputs, ctx),
+                );
+                let _ = self.executor.registry.unregister(&module.module_id);
+                let _ = self.executor.registry.register(
+                    &module.module_id,
+                    Box::new(module_obj),
+                    descriptor,
+                );
             }
-            let refs: Vec<ScannedModule> = handler_modules.into_iter().cloned().collect();
-            writer.write(&refs, &mut executor.registry, false, false);
         }
 
         Ok(())
@@ -202,8 +227,7 @@ impl AxumApcore {
         inputs: Value,
         context: Option<&Context<Value>>,
     ) -> Result<Value, AxumApcoreError> {
-        let executor = self.executor.lock().await;
-        let result = executor.call(module_id, inputs, context, None).await?;
+        let result = self.executor.call(module_id, inputs, context, None).await?;
         Ok(result)
     }
 
@@ -217,19 +241,25 @@ impl AxumApcore {
         self.call(module_id, inputs, Some(&ctx)).await
     }
 
-    /// Execute a module with streaming output.
+    /// Execute a module with streaming output, collecting all chunks.
     ///
-    /// Returns a vector of result chunks. The apcore executor currently
-    /// wraps the single result in a vec; true streaming will be added
-    /// when the protocol supports it.
+    /// apcore 0.22+ `Executor::stream` returns a `Stream` of result chunks
+    /// (true streaming) rather than a future resolving to a `Vec`. This
+    /// helper drains the stream into a `Vec`, short-circuiting on the first
+    /// chunk error. Callers that need incremental delivery should consume the
+    /// executor's stream directly.
     pub async fn stream(
         &self,
         module_id: &str,
         inputs: Value,
         context: Option<&Context<Value>>,
     ) -> Result<Vec<Value>, AxumApcoreError> {
-        let executor = self.executor.lock().await;
-        let results = executor.stream(module_id, inputs, context, None).await?;
+        use futures::TryStreamExt;
+        let results: Vec<Value> = self
+            .executor
+            .stream(module_id, inputs, context, None)
+            .try_collect()
+            .await?;
         Ok(results)
     }
 
@@ -261,12 +291,7 @@ impl AxumApcore {
             }
         };
 
-        // Wrap both lock acquisition and call inside the timeout so the
-        // full duration is bounded, not just the call itself.
-        let call_fut = async {
-            let executor = self.executor.lock().await;
-            executor.call(module_id, inputs, Some(&ctx), None).await
-        };
+        let call_fut = self.executor.call(module_id, inputs, Some(&ctx), None);
 
         match tokio::time::timeout(timeout, call_fut).await {
             Ok(result) => Ok(result?),
@@ -302,8 +327,9 @@ impl AxumApcore {
             let mut ctx = Context::new(anonymous_identity());
             ctx.cancel_token = Some(cancel_token);
 
-            let exec = executor.lock().await;
-            let result = exec.call(&module_id_owned, inputs, Some(&ctx), None).await;
+            let result = executor
+                .call(&module_id_owned, inputs, Some(&ctx), None)
+                .await;
 
             match result {
                 Ok(value) => task_manager.complete(&task_id_clone, value),
@@ -360,7 +386,12 @@ impl AxumApcore {
 
     // ---- MCP Server ----
 
-    /// Create an MCP server from the current registry (requires "mcp" feature).
+    /// Create an MCP server backed by the live executor (requires "mcp" feature).
+    ///
+    /// The server is wired to the same `Arc<Executor>` this client executes
+    /// against (apcore-mcp 0.17 actually drives the transport and registers the
+    /// executor's modules as tools), so MCP tool calls run the real registered
+    /// handlers rather than serving schema-only definitions.
     #[cfg(feature = "mcp")]
     pub fn create_mcp_server(&self) -> Result<apcore_mcp::MCPServer, AxumApcoreError> {
         let transport: apcore_mcp::TransportKind = self
@@ -376,13 +407,17 @@ impl AxumApcore {
             name: self.settings.server_name.clone(),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             validate_inputs: true,
-            tags: None,
-            prefix: None,
             require_auth: self.settings.jwt_secret.is_some(),
-            exempt_paths: None,
+            trace: self.settings.tracing,
+            explorer: self.settings.explorer_enabled,
+            explorer_prefix: self.settings.explorer_prefix.clone(),
+            ..Default::default()
         };
 
-        Ok(apcore_mcp::MCPServer::new(config))
+        let backend = apcore_mcp::RegistryOrExecutor::Executor(self.executor.clone());
+        Ok(apcore_mcp::MCPServer::with_registry_or_executor(
+            backend, config,
+        ))
     }
 
     // ---- Accessors ----
@@ -395,7 +430,7 @@ impl AxumApcore {
         self.registry.clone()
     }
 
-    pub fn executor(&self) -> Arc<tokio::sync::Mutex<Executor>> {
+    pub fn executor(&self) -> Arc<Executor> {
         self.executor.clone()
     }
 
@@ -414,11 +449,7 @@ impl AxumApcore {
     /// List registered module IDs.
     pub fn list_modules(&self) -> Vec<String> {
         let registry = self.registry.lock().expect("registry lock poisoned");
-        registry
-            .list(None, None)
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect()
+        registry.list(None, None, None)
     }
 
     // ---- CLI (HTTP proxy) ----
@@ -454,17 +485,22 @@ impl AxumApcore {
         router: &axum::Router,
         config: CreateCliConfig,
     ) -> Result<clap::Command, AxumApcoreError> {
+        use apcore_cli::discovery::{
+            register_describe_command, register_list_command, RegistryProvider,
+        };
+        use apcore_cli::shell::{register_completion_command, register_man_command};
         use apcore_cli::{
-            register_discovery_commands, register_shell_commands, set_docs_url, set_verbose_help,
-            ApCoreRegistryProvider, GroupedModuleGroup,
+            build_module_command_with_limit, register_init_command, set_all_options_help,
+            set_docs_url, ApCoreRegistryProvider,
         };
         use apcore_toolkit::HTTPProxyRegistryWriter;
 
-        // Apply apcore-cli global settings
-        set_verbose_help(config.verbose_help);
+        // Apply apcore-cli global settings. `set_verbose_help` was renamed to
+        // `set_all_options_help` in apcore-cli 0.9.
+        set_all_options_help(config.verbose_help);
         set_docs_url(config.docs_url.clone());
 
-        // 1. Scan routes using the config's scanner source (not self.settings)
+        // 1. Scan routes using the config's scanner source (not self.settings).
         let scanner = crate::scanner::get_scanner(&config.scan_source)?;
         let modules = scanner
             .scan(router, config.include.as_deref(), config.exclude.as_deref())
@@ -475,14 +511,17 @@ impl AxumApcore {
             modules.len()
         );
 
-        // 2. Register as HTTP proxy modules
-        let mut proxy_registry = Registry::new();
+        // 2. Register as HTTP proxy modules. The writer constructor is now
+        // fallible (apcore-toolkit 0.8 validates the base URL and timeout), and
+        // its `write` takes `&Registry` (interior-mutable) since toolkit 0.9.
+        let proxy_registry = Registry::new();
         let writer = HTTPProxyRegistryWriter::new(
             config.base_url.clone(),
             config.auth_header_factory,
             config.timeout,
-        );
-        let results = writer.write(&modules, &mut proxy_registry);
+        )
+        .map_err(|e| AxumApcoreError::Config(format!("Invalid HTTP proxy config: {e}")))?;
+        let results = writer.write(&modules, &proxy_registry);
         let registered = results.iter().filter(|r| r.verified).count();
         tracing::info!(
             registered,
@@ -490,31 +529,11 @@ impl AxumApcore {
             "Registered HTTP proxy modules"
         );
 
-        // 3. Build registry provider for discovery commands.
-        // ApCoreRegistryProvider takes ownership of a Registry, so we build
-        // the provider from the proxy registry directly.
+        // 3. Wrap the proxy registry in a RegistryProvider used both for
+        // building per-module commands and for discovery-command dispatch.
         let provider = ApCoreRegistryProvider::new(proxy_registry);
-        let registry_arc: std::sync::Arc<dyn apcore_cli::RegistryProvider> =
-            std::sync::Arc::new(provider);
 
-        // GroupedModuleGroup requires an executor Arc but only uses the registry
-        // for building the command tree. We create a placeholder executor.
-        let placeholder_registry = Registry::new();
-        let placeholder_executor =
-            apcore::Executor::new(placeholder_registry, apcore::Config::default());
-        let executor_adapter = apcore_cli::cli::ApCoreExecutorAdapter(placeholder_executor);
-        let executor_arc: std::sync::Arc<dyn apcore_cli::ModuleExecutor> =
-            std::sync::Arc::new(executor_adapter);
-
-        // 4. Build GroupedModuleGroup for organized commands
-        let mut gmg = GroupedModuleGroup::new(
-            registry_arc.clone(),
-            executor_arc,
-            config.help_text_max_length,
-        );
-        gmg.build_group_map();
-
-        // 5. Build the root clap Command
+        // 4. Build the root clap Command.
         let cli_description = format!(
             "{prog} — CLI for Axum API.\n\n\
              Tips:\n\
@@ -529,21 +548,29 @@ impl AxumApcore {
             .subcommand_required(true)
             .arg_required_else_help(true);
 
-        // 5a. Add grouped module subcommands
-        for name in gmg.list_commands() {
-            if let Some(sub) = gmg.get_command(&name) {
-                cmd = cmd.subcommand(sub);
+        // 5. One subcommand per scanned route. apcore-cli 0.7 removed
+        // `GroupedModuleGroup`; `build_module_command_with_limit` constructs a
+        // clap Command directly from each module descriptor.
+        for module_id in RegistryProvider::list(&provider) {
+            let Some(descriptor) = provider.get_module_descriptor(&module_id) else {
+                continue;
+            };
+            match build_module_command_with_limit(&descriptor, config.help_text_max_length) {
+                Ok(sub) => cmd = cmd.subcommand(sub),
+                Err(e) => {
+                    tracing::warn!(module_id = %module_id, error = %e, "Skipping module command")
+                }
             }
         }
 
-        // 6. Register discovery commands (list, describe)
-        cmd = register_discovery_commands(cmd, registry_arc);
-
-        // 7. Register shell commands (completion, man)
-        cmd = register_shell_commands(cmd, &config.prog_name);
-
-        // 8. Register init command
-        cmd = cmd.subcommand(apcore_cli::init_command());
+        // 6. Built-in discovery, shell, and init subcommands. apcore-cli 0.9
+        // removed the `register_discovery_commands` / `register_shell_commands`
+        // umbrella helpers in favor of per-command registrars.
+        cmd = register_list_command(cmd);
+        cmd = register_describe_command(cmd);
+        cmd = register_completion_command(cmd);
+        cmd = register_man_command(cmd);
+        cmd = register_init_command(cmd);
 
         Ok(cmd)
     }
@@ -600,12 +627,13 @@ impl Default for CreateCliConfig {
 
 /// Create an anonymous identity for default contexts.
 fn anonymous_identity() -> Identity {
-    Identity {
-        id: "anonymous".into(),
-        identity_type: "anonymous".into(),
-        roles: vec![],
-        attrs: HashMap::new(),
-    }
+    // apcore 0.16 made Identity fields private; use the canonical constructor.
+    Identity::new(
+        "anonymous".into(),
+        "anonymous".into(),
+        vec![],
+        HashMap::new(),
+    )
 }
 
 /// Create a snapshot copy of a registry (schema-only, no handlers).
@@ -614,12 +642,17 @@ fn registry_snapshot(source: &Registry) -> Registry {
     // We create a new empty registry for the backend source.
     // The MCPServer will read module descriptors from the registry it's given.
     // Since we hold a lock, we copy descriptor data here.
-    let mut target = Registry::new();
-    for name in source.list(None, None) {
-        if let Some(descriptor) = source.get_definition(name) {
-            // Register with passthrough handler — MCP only needs the schema
+    // `Registry::register` is interior-mutable (`&self`) in apcore 0.24, so
+    // the target registry does not need to be `mut`.
+    let target = Registry::new();
+    for name in source.list(None, None, None) {
+        // apcore 0.24 changed `get_definition` to return a Result; treat any
+        // error or missing definition as "skip this module".
+        if let Ok(Some(descriptor)) = source.get_definition(&name) {
+            // Register with passthrough handler — MCP only needs the schema.
+            // `annotations` is now `Option<ModuleAnnotations>` (apcore 0.18.1).
             let fm = apcore::decorator::FunctionModule::new::<_, ()>(
-                descriptor.annotations.clone(),
+                descriptor.annotations.clone().unwrap_or_default(),
                 descriptor.input_schema.clone(),
                 descriptor.output_schema.clone(),
                 |inputs: Value,
@@ -633,7 +666,7 @@ fn registry_snapshot(source: &Registry) -> Registry {
                 > { Box::pin(async move { Ok(inputs) }) },
             );
             // Ignore registration errors (e.g., duplicate names in edge cases)
-            let _ = target.register(name, Box::new(fm), descriptor.clone());
+            let _ = target.register(&name, Box::new(fm), descriptor.clone());
         }
     }
     target
@@ -668,9 +701,9 @@ mod tests {
     #[test]
     fn test_anonymous_identity() {
         let id = anonymous_identity();
-        assert_eq!(id.id, "anonymous");
-        assert_eq!(id.identity_type, "anonymous");
-        assert!(id.roles.is_empty());
+        assert_eq!(id.id(), "anonymous");
+        assert_eq!(id.identity_type(), "anonymous");
+        assert!(id.roles().is_empty());
     }
 
     #[test]

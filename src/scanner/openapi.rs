@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use apcore_toolkit::{
     deduplicate_ids, extract_input_schema, extract_output_schema, filter_modules,
-    infer_annotations_from_method, ScannedModule,
+    generate_suggested_alias, infer_annotations_from_method, ScannedModule,
 };
 
 use crate::errors::AxumApcoreError;
@@ -131,6 +131,9 @@ impl OpenAPIScanner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // CLI/MCP-friendly alias derived from the route (apcore-toolkit 0.5+).
+        let suggested_alias = generate_suggested_alias(path, method);
+
         ScannedModule {
             module_id,
             description,
@@ -141,8 +144,10 @@ impl OpenAPIScanner {
             version: "1.0.0".into(),
             annotations: Some(annotations),
             documentation,
+            suggested_alias: Some(suggested_alias),
             examples: vec![],
             metadata,
+            display: None,
             warnings: vec![],
         }
     }

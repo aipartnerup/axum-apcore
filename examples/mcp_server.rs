@@ -141,7 +141,7 @@ async fn main() {
         match apcore.create_mcp_server() {
             Ok(server) => {
                 println!("MCP server created: {:?}", server.config());
-                println!("To start: call server.run().await");
+                println!("To start: call server.start().await, then server.wait().await");
             }
             Err(e) => println!("MCP server error: {e}"),
         }

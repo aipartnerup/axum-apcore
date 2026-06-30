@@ -450,11 +450,13 @@ fn build_registry_provider() -> apcore_cli::ApCoreRegistryProvider {
     let registry_arc = crate::engine::registry::get_registry();
     let registry = registry_arc.lock().expect("registry lock poisoned");
 
-    let mut fresh = apcore::Registry::new();
-    for name in registry.list(None, None) {
-        if let Some(descriptor) = registry.get_definition(name) {
+    // `Registry::register` is interior-mutable (`&self`) in apcore 0.24.
+    let fresh = apcore::Registry::new();
+    for name in registry.list(None, None, None) {
+        // apcore 0.24: `get_definition` returns Result; `annotations` is Option.
+        if let Ok(Some(descriptor)) = registry.get_definition(&name) {
             let fm = apcore::decorator::FunctionModule::new::<_, ()>(
-                descriptor.annotations.clone(),
+                descriptor.annotations.clone().unwrap_or_default(),
                 descriptor.input_schema.clone(),
                 descriptor.output_schema.clone(),
                 |inputs: serde_json::Value,
@@ -468,7 +470,7 @@ fn build_registry_provider() -> apcore_cli::ApCoreRegistryProvider {
                     >,
                 > { Box::pin(async move { Ok(inputs) }) },
             );
-            let _ = fresh.register(name, Box::new(fm), descriptor.clone());
+            let _ = fresh.register(&name, Box::new(fm), descriptor.clone());
         }
     }
 
@@ -480,7 +482,14 @@ fn run_list(tags: Vec<String>, format: Option<String>) -> Result<(), AxumApcoreE
     let provider = build_registry_provider();
     let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
 
-    let output = apcore_cli::cmd_list(&provider, &tag_refs, format.as_deref())
+    // apcore-cli 0.9 demoted `cmd_list` to crate-private; `cmd_list_enhanced`
+    // is the public entry point and adds search/status/sort filtering.
+    let opts = apcore_cli::ListOptions {
+        tags: &tag_refs,
+        explicit_format: format.as_deref(),
+        ..apcore_cli::ListOptions::default()
+    };
+    let output = apcore_cli::cmd_list_enhanced(&provider, &opts)
         .map_err(|e| AxumApcoreError::Config(format!("List error: {e}")))?;
     println!("{output}");
     Ok(())

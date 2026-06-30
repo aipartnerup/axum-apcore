@@ -28,6 +28,33 @@ fn test_settings() -> ApcoreSettings {
     }
 }
 
+// D7-001: cross-integration config-default consistency. axum-apcore mirrors
+// fastapi-apcore / django-apcore defaults, with the single documented exception
+// that serve_transport is "streamable-http" (axum is HTTP-native; stdio N/A).
+#[test]
+fn test_default_settings_match_sibling_integrations() {
+    let s = ApcoreSettings::default();
+    // Aligned with fastapi-apcore / django-apcore.
+    assert!(
+        !s.explorer_enabled,
+        "explorer must default off, matching fastapi/django"
+    );
+    assert_eq!(
+        s.task_max_tasks, 1000,
+        "task_max_tasks must match fastapi/django default 1000"
+    );
+    assert_eq!(
+        s.serve_port, 9090,
+        "serve_port must match fastapi/django default 9090"
+    );
+    assert_eq!(s.task_max_concurrent, 10);
+    // Documented intentional HTTP-native delta.
+    assert_eq!(
+        s.serve_transport, "streamable-http",
+        "axum is HTTP-native, stdio N/A"
+    );
+}
+
 fn make_route(method: &str, path: &str, handler: &str, desc: &str) -> RouteMetadata {
     RouteMetadata {
         method: method.into(),
@@ -47,7 +74,7 @@ async fn echo_handler(input: Value, _ctx: &Context<Value>) -> Result<Value, Modu
 
 async fn ctx_echo_handler(input: Value, ctx: &Context<Value>) -> Result<Value, ModuleError> {
     Ok(json!({
-        "caller": ctx.identity.as_ref().map(|i| i.id.as_str()).unwrap_or("anonymous"),
+        "caller": ctx.identity.as_ref().map(|i| i.id()).unwrap_or("anonymous"),
         "input": input,
     }))
 }
@@ -126,12 +153,12 @@ async fn test_call_with_identity_context() {
     let router = Router::new();
     apcore.init_app(&router).await.unwrap();
 
-    let ctx = Context::new(Identity {
-        id: "admin-ctx".into(),
-        identity_type: "admin".into(),
-        roles: vec!["admin".into()],
-        attrs: Default::default(),
-    });
+    let ctx = Context::new(Identity::new(
+        "admin-ctx".into(),
+        "admin".into(),
+        vec!["admin".into()],
+        Default::default(),
+    ));
 
     let result = apcore
         .call(
@@ -319,9 +346,9 @@ fn test_context_factory_with_request_identity() {
 
     let ctx = factory.create_from_parts(&parts).unwrap();
     let identity = ctx.identity.as_ref().unwrap();
-    assert_eq!(identity.id, "svc-1");
-    assert_eq!(identity.identity_type, "service");
-    assert_eq!(identity.roles.len(), 2);
+    assert_eq!(identity.id(), "svc-1");
+    assert_eq!(identity.identity_type(), "service");
+    assert_eq!(identity.roles().len(), 2);
 }
 
 #[test]
@@ -332,7 +359,7 @@ fn test_context_factory_anonymous_fallback() {
     let (parts, _) = req.into_parts();
 
     let ctx = factory.create_from_parts(&parts).unwrap();
-    assert_eq!(ctx.identity.as_ref().unwrap().id, "anonymous");
+    assert_eq!(ctx.identity.as_ref().unwrap().id(), "anonymous");
 }
 
 // ---------------------------------------------------------------------------

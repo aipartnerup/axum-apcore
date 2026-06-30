@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use apcore_toolkit::{
-    deduplicate_ids, filter_modules, infer_annotations_from_method, ScannedModule,
+    deduplicate_ids, filter_modules, generate_suggested_alias, infer_annotations_from_method,
+    ScannedModule,
 };
 use async_trait::async_trait;
 
@@ -116,6 +117,11 @@ impl NativeAxumScanner {
             serde_json::Value::String(meta.path.clone()),
         );
 
+        // A CLI/MCP-friendly alias derived from the HTTP route, e.g.
+        // `GET /api/users/:id` -> "users-get". Surface adapters prefer this
+        // over the dotted module_id when present (apcore-toolkit 0.5+).
+        let suggested_alias = generate_suggested_alias(&meta.path, &meta.method);
+
         ScannedModule {
             module_id,
             description: meta.description.clone(),
@@ -126,8 +132,10 @@ impl NativeAxumScanner {
             version: "1.0.0".into(),
             annotations: Some(annotations),
             documentation: meta.documentation.clone(),
+            suggested_alias: Some(suggested_alias),
             examples: vec![],
             metadata: metadata_map,
+            display: None,
             warnings: vec![],
         }
     }
