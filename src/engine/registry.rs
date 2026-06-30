@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use apcore::{Config, Executor, Registry};
+use apcore::{Config, Executor, Registry, ACL};
 
 use crate::config::get_apcore_settings;
 
@@ -34,15 +34,54 @@ pub fn get_registry() -> Arc<Mutex<Registry>> {
 /// Returns a shared `Arc<Executor>`. The executor is interior-mutable, so
 /// `call()`, `stream()`, and `cancellable_call()` operate on `&self` without
 /// any outer lock.
+///
+/// When `APCORE_ACL_PATH` (settings `acl_path`) points at an ACL YAML file, the
+/// executor is built via `Executor::with_options` with that ACL attached, so
+/// apcore's `acl_check` pipeline step enforces caller authorization on every
+/// `call`/`stream`. Top-level requests are checked as the `@external` caller;
+/// inter-module calls are checked under the calling module's id. Without
+/// `acl_path` the executor carries no ACL and all calls are permitted, matching
+/// fastapi-apcore's `acl_path`-driven wiring.
 pub fn get_executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             tracing::debug!("Initializing apcore Executor");
             let registry = Registry::new();
             let config = build_config();
-            Arc::new(Executor::new(registry, config))
+            match load_acl() {
+                Some(acl) => Arc::new(Executor::with_options(
+                    registry,
+                    config,
+                    None,
+                    Some(acl),
+                    None,
+                )),
+                None => Arc::new(Executor::new(registry, config)),
+            }
         })
         .clone()
+}
+
+/// Load the ACL from `settings.acl_path`, if configured.
+///
+/// Returns `None` when no `acl_path` is set. A configured-but-unloadable ACL
+/// (missing file, malformed rules) is logged and treated as `None` rather than
+/// panicking — a broken ACL must not crash executor initialization. This is a
+/// deliberate fail-open on *load* errors only; once a valid ACL is loaded its
+/// own `default_effect` governs unmatched calls (default-deny per apcore).
+fn load_acl() -> Option<ACL> {
+    let settings = get_apcore_settings();
+    let path = settings.acl_path.as_deref()?;
+    match ACL::load(path) {
+        Ok(acl) => {
+            tracing::info!(acl_path = path, "Loaded ACL for executor");
+            Some(acl)
+        }
+        Err(e) => {
+            tracing::error!(acl_path = path, error = %e.message, "Failed to load ACL; proceeding without access control");
+            None
+        }
+    }
 }
 
 /// Build an apcore Config from settings.

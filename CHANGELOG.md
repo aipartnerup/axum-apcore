@@ -6,7 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
-## [0.2.0] - 2026-04-01
+## [0.2.0] - 2026-06-30
+
+### Added
+
+#### Access Control (ACL)
+- **ACL enforcement via `acl_path`** — When `APCORE_ACL_PATH` (settings `acl_path`) points at an ACL YAML file, the executor is now built with that ACL attached (`Executor::with_options`), so apcore's `acl_check` pipeline step authorizes every `call()` / `stream()`. Top-level (HTTP-originated) calls are checked as the `@external` caller; inter-module calls are checked under the calling module's id. Mirrors fastapi-apcore's `acl_path`-driven wiring.
+- **`tests/acl_test.rs`** — Integration test that loads an ACL fixture and asserts a denied module returns `ErrorCode::ACLDenied` while an allowed module succeeds.
+
+### Changed
+
+#### Dependency Upgrades
+- **`apcore`** 0.24 → 0.25 — `Executor` is now fully interior-mutable (`call`/`stream` take `&self`; `registry` is an `Arc<Registry>`).
+- **`apcore-toolkit`** 0.8 → 0.9.1 — `RegistryWriter::write` / `HttpProxyWriter::write` relaxed from `&mut Registry` to `&Registry`.
+- **`apcore-mcp`** 0.16 → 0.17 — `MCPServer` now actually serves: drives the transport, registers tool/resource handlers, mounts `/mcp`, and wires approvals.
+- **`apcore-cli`** 0.10.1 → 0.10.2.
+
+#### Executor
+- **Lock-free executor** — The global executor is now a bare `Arc<Executor>` (was `Arc<tokio::sync::Mutex<Executor>>`). apcore 0.25's interior-mutable `Executor` lets concurrent callers share one instance without serializing through a mutex, removing a per-call bottleneck in `call`/`stream`/`cancellable_call`/`submit_task`/`register_modules`.
+
+#### MCP
+- **`create_mcp_server()` wires the live executor** — Builds the server via `MCPServer::with_registry_or_executor(RegistryOrExecutor::Executor(...), config)` so MCP tool calls execute real registered handlers, and spreads apcore-mcp 0.17's new config fields (`trace`, `explorer`, `explorer_prefix`, …) from `ApcoreSettings`.
+
+#### Errors
+- **`ACLDenied` → HTTP 403** — `AxumApcoreError::into_response` now maps an ACL denial to `403 Forbidden` instead of the generic `500` (other execution errors stay `500`).
+
+### Fixed
+- **`acl_path` was a dead config** — The `acl_path` setting and `APCORE_ACL_PATH` env var were parsed but never loaded or applied, so ACL was silently a no-op. The path is now loaded via `ACL::load` and enforced by the executor. A malformed or missing ACL file is logged and treated as "no ACL" rather than crashing executor initialization.
+
+### Tests
+- 80 unit + 11 integration + 1 ACL test, all passing with `cargo test --all-features`.
 
 ### Added
 

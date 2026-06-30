@@ -18,6 +18,7 @@ Axum integration for the [apcore](https://github.com/aiperceivable/apcore-rust) 
 - **Async task management** — Submit background tasks with status tracking, cancellation, and cleanup
 - **MCP server** — Serve registered modules as MCP tools (stdio, streamable-http, SSE transports)
 - **OpenAI export** — Export modules as OpenAI-compatible tool definitions
+- **Access control** — Enforce caller authorization via an apcore ACL file (`APCORE_ACL_PATH`)
 - **YAML bindings** — Auto-discover modules from YAML binding files
 - **CLI** — Scan, serve, export, manage tasks, list/describe modules, shell completions, man pages, and module scaffolding
 - **HTTP proxy CLI** — Generate a full CLI where each command forwards requests to the running API via HTTP (`create_cli()`)
@@ -348,10 +349,44 @@ All settings are read from environment variables with the `APCORE_` prefix:
 | `APCORE_SERVE_PORT` | `9090` | MCP server port |
 | `APCORE_SERVER_NAME` | `axum-apcore` | MCP server name |
 | `APCORE_JWT_SECRET` | — | JWT secret for MCP auth |
+| `APCORE_ACL_PATH` | — | Path to an ACL YAML file; enables module access control (see below) |
 | `APCORE_TRACING` | `false` | Enable tracing middleware |
 | `APCORE_METRICS` | `false` | Enable metrics collection |
 | `APCORE_TASK_MAX_CONCURRENT` | `10` | Max concurrent background tasks |
 | `APCORE_TASK_MAX_TASKS` | `100` | Max total tasks in queue |
+
+### Access control (ACL)
+
+Set `APCORE_ACL_PATH` (or `ApcoreSettings::acl_path`) to an ACL YAML file to have
+apcore enforce caller authorization on every `call()` / `stream()`. The executor
+runs apcore's `acl_check` pipeline step; a denied call returns
+`ErrorCode::ACLDenied`, which maps to HTTP **403 Forbidden**.
+
+ACL rules match on the **caller id**, which is apcore's module-level identity —
+**not** the request's `RequestIdentity`/JWT subject:
+
+- a top-level request (your HTTP route invoking a module) is checked as the
+  `@external` caller;
+- a module calling another module is checked under the **calling module's** id.
+
+```yaml
+# acl/global_acl.yaml
+default_effect: allow
+rules:
+  - callers: ["@external"]          # all top-level (HTTP-originated) calls
+    targets: ["admin.delete_user.delete"]
+    effect: deny
+    description: "External callers cannot reach the admin delete module."
+```
+
+```bash
+APCORE_ACL_PATH=acl/global_acl.yaml cargo run --example handler_registration
+```
+
+Use ACL for module-level / external-entry authorization. For per-user HTTP authz
+(roles, ownership), keep using the Axum middleware / JWT layer — that identity is
+available on `ApContext` but is independent of the ACL caller id. A malformed or
+missing ACL file is logged and treated as "no ACL" rather than crashing startup.
 
 ## Examples
 

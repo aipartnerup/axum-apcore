@@ -35,6 +35,12 @@ impl IntoResponse for AxumApcoreError {
             AxumApcoreError::Scanner(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             AxumApcoreError::Registration(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             AxumApcoreError::Context(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+            // An ACL denial is an authorization failure, not a server fault, so
+            // it maps to 403 Forbidden rather than the generic 500. Other
+            // execution errors stay 500 (the handler raised an internal fault).
+            AxumApcoreError::Execution(e) if e.code == apcore::ErrorCode::ACLDenied => {
+                (StatusCode::FORBIDDEN, e.message.clone())
+            }
             AxumApcoreError::Execution(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message.clone()),
             AxumApcoreError::Regex(e) => (StatusCode::BAD_REQUEST, e.to_string()),
             AxumApcoreError::Json(e) => (StatusCode::BAD_REQUEST, e.to_string()),
