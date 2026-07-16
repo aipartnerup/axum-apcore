@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.3.0] - 2026-07-16
+
+ACL demo + dependency uplift to the aligned apcore 0.26.0 / apcore-mcp 0.17.2 governance train.
+
+### Added
+
+- **ACL demo (`examples/acl_demo/`)** — runnable Axum app showing apcore Access Control List enforcement on route handlers, matching the shared cross-integration contract: an `acl.yaml` (admins may call anything; `orders.list` public; else denied), `orders.delete` / `orders.list` registered as apcore modules with explicit IDs, an `inject_identity` middleware mapping a comma-separated `X-Roles` header into a `RequestIdentity` extension, and handlers that call the modules through `AxumApcore::call()` with `ACLDenied` mapped to HTTP 403. Verified by `cargo test --example acl_demo` (admin allowed; anonymous / non-admin denied; public read).
+
+### Changed
+
+- **Dependency floors raised to the aligned governance train and loosened from caret to `>=`** (matching the first-party apcore-dependency convention, so future apcore minor releases need no downstream edits): `apcore >= 0.26` (was `0.25`), `apcore-toolkit >= 0.10` (was `0.9`), `apcore-cli >= 0.10.4`, `apcore-mcp >= 0.17.2`.
+
+---
 ## [0.2.0] - 2026-06-30
 
 ### Added
